@@ -1,0 +1,28 @@
+# Python Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Vector Database (Local data generated at runtime)
+chroma_db/
+*.parquet
+*.sqlite3
+
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Environment and Secrets
+.env
+.env.local
+
+# Logs and temporary files
+*.log
+scratch/
