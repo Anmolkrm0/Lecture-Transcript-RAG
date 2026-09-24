@@ -7,3 +7,4 @@ langchain-chroma>=0.1.0
 langchain-text-splitters>=0.2.0
 chromadb>=0.5.0
 pymupdf>=1.24.0
+flashrank>=0.2.10
