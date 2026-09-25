@@ -1,5 +1,6 @@
 import gc
 import os
+import re
 import time
 import warnings
 from typing import Generator, List, Set, Tuple
@@ -64,8 +65,16 @@ SYSTEM_PROMPT = (
     "3. QUIZZES & MCQs: When asked for a quiz, test, or multiple-choice questions, generate challenging questions directly grounded in the lectures. For MCQs, provide 4 options (A, B, C, D), clearly indicate the correct answer, and include a brief explanation citing the context.\n"
     "4. FLASHCARDS: When asked for flashcards, format each card clearly with [Card N], **Front / Concept**, and **Back / Explanation / Definition**.\n"
     "5. IN-DEPTH EXPLANATIONS: For specific queries, deliver thorough, well-articulated explanations directly addressing the user's intent.\n\n"
-    "MANDATORY CITATION:\n"
-    "- Always end your response with an explicit citation listing the source document(s) used (e.g., 'Source: [Document Name]')."
+    "EXACT SOURCE CITATION & VERIFICATION RULES:\n"
+    "To make it effortless for users to verify and validate every answer against the original lecture transcripts:\n"
+    "- IN-TEXT CITATIONS: Whenever stating a key point, definition, or explanation, immediately cite the exact source in brackets, e.g.: `[Source: <Document Name>, Page <Page/Time>]`.\n"
+    "- VERIFIED SOURCES & EVIDENCE: Always conclude your response with a dedicated section:\n"
+    "  ### 📚 Verified Sources & Citations\n"
+    "  List every source referenced in your answer with:\n"
+    "  * **Document**: Exact document name\n"
+    "  * **Location**: Page number or timestamp\n"
+    "  * **Key Evidence / Quote**: A short, direct quote from the transcript validating the information.\n"
+    "- NEVER invent source titles or citations. Use ONLY the exact document names and locations given in the Context."
 )
 
 st.set_page_config(
@@ -349,6 +358,72 @@ def rerank_documents(
     return reranked_docs
 
 
+def extract_timestamp(text: str) -> str:
+    """Extract VTT/SRT transcript timestamps if present."""
+    match = re.search(r"(\d{2}:\d{2}:\d{2}(?:\.\d+)?) --> (\d{2}:\d{2}:\d{2}(?:\.\d+)?)", text)
+    if match:
+        return f"{match.group(1)} - {match.group(2)}"
+    single = re.search(r"(\d{2}:\d{2}:\d{2})", text)
+    if single:
+        return single.group(1)
+    return ""
+
+
+def render_citation_ui(sources_data: List[dict]):
+    """Render interactive citation badges and expandable validation cards for retrieved source chunks."""
+    if not sources_data:
+        return
+
+    # 1. Quick citation chips directly under the answer
+    unique_sources = []
+    seen = set()
+    for s in sources_data:
+        src_label = s.get("source", "Document")
+        ts = s.get("timestamp")
+        page = s.get("page")
+        loc_parts = []
+        if ts:
+            loc_parts.append(f"⏱️ {ts}")
+        elif page:
+            loc_parts.append(f"p. {page}")
+        loc_str = f" ({', '.join(loc_parts)})" if loc_parts else ""
+        label = f"{src_label}{loc_str}"
+        if label not in seen:
+            seen.add(label)
+            unique_sources.append(f"`📄 {label}`")
+
+    if unique_sources:
+        st.markdown(f"**🔍 Verified Citations:** {' • '.join(unique_sources)}")
+
+    # 2. Detailed Expandable Verification Cards
+    with st.expander(f"📚 Inspect Original Source Passages ({len(sources_data)} chunks reranked)", expanded=False):
+        st.caption("Verify and cross-reference the answer directly against original transcript excerpts:")
+        for s_idx, src in enumerate(sources_data, start=1):
+            src_name = src.get("source", "Unknown Document")
+            page = src.get("page")
+            score = src.get("score")
+            ts = src.get("timestamp")
+
+            badges = []
+            if page:
+                badges.append(f"📄 Page {page}")
+            if ts:
+                badges.append(f"⏱️ {ts}")
+            if score is not None:
+                badges.append(f"🎯 Relevance: `{score:.4f}`")
+
+            meta_line = " • ".join(badges)
+            st.markdown(f"**Rank [{s_idx}] — `{src_name}`** (*{meta_line}*)")
+
+            content = src.get("content", "").strip()
+            # Clean leading VTT timing headers for cleaner quote presentation
+            cleaned_content = re.sub(r"^\d+\s*\n\d{2}:\d{2}:\d{2}.*?\n", "", content)
+            st.info(f"“{cleaned_content}”")
+            if s_idx < len(sources_data):
+                st.divider()
+
+
+
 # ==========================================
 # Streamlit Session State & Init
 # ==========================================
@@ -524,12 +599,7 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if message["role"] == "assistant" and message.get("sources"):
-            with st.expander(f"📚 Retrieved & Reranked Sources ({len(message['sources'])} chunks selected from top 10)"):
-                for s_idx, src in enumerate(message["sources"], start=1):
-                    page_str = f" | Page {src['page']}" if src.get("page") else ""
-                    score_str = f" | 🎯 Rerank Score: `{src['score']:.4f}`" if "score" in src and src["score"] is not None else ""
-                    st.markdown(f"**Rank [{s_idx}]:** `{src['source']}`{page_str}{score_str}")
-                    st.info(src["content"])
+            render_citation_ui(message["sources"])
 
 # User input
 user_query = st.chat_input("Ask a question about your lectures...")
@@ -589,13 +659,20 @@ if user_query:
                 for idx, (doc, score) in enumerate(reranked_pairs, start=1):
                     src_name = doc.metadata.get("source", "Unknown Document")
                     page_num = doc.metadata.get("page", 1)
+                    ts = extract_timestamp(doc.page_content)
+                    loc_desc = f"Page {page_num}"
+                    if ts:
+                        loc_desc += f", Time: {ts}"
+
                     context_parts.append(
-                        f"[Excerpt {idx}] Source: {src_name} (Page {page_num}, Relevance Score: {score:.3f})\nContent:\n{doc.page_content}"
+                        f"--- [Source {idx}: {src_name} ({loc_desc})] ---\n"
+                        f"{doc.page_content}"
                     )
                     sources_data.append({
                         "source": src_name,
                         "page": page_num,
                         "score": score,
+                        "timestamp": ts,
                         "content": doc.page_content,
                     })
 
@@ -628,16 +705,10 @@ if user_query:
 
                 full_response = st.write_stream(generate_response_stream())
 
-                # 5. Display Citations Expander with Rerank Scores
-                if sources_data:
-                    with st.expander(f"📚 Retrieved & Reranked Sources (Top {len(sources_data)} selected from {len(initial_docs)} retrieved chunks)"):
-                        for s_idx, src in enumerate(sources_data, start=1):
-                            page_str = f" | Page {src['page']}" if src.get("page") else ""
-                            score_str = f" | 🎯 Rerank Score: `{src['score']:.4f}`" if "score" in src and src["score"] is not None else ""
-                            st.markdown(f"**Rank [{s_idx}]:** `{src['source']}`{page_str}{score_str}")
-                            st.info(src["content"])
+                # 5. Display Interactive Citations and Verification Cards
+                render_citation_ui(sources_data)
 
-                # 5. Persist assistant response with sources in session state
+                # 6. Persist assistant response with sources in session state
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": full_response,
