@@ -1,0 +1,78 @@
+[
+  {
+    "id": "eval_001",
+    "question": "What is the GenAI value stack and what are its layers?",
+    "expected_sources": [
+      "Context enigneering.txt",
+      "Generative AI Basics - Session 1"
+    ],
+    "keywords": [
+      "infrastructure",
+      "energy",
+      "model",
+      "service",
+      "application"
+    ]
+  },
+  {
+    "id": "eval_002",
+    "question": "What is context engineering and why is it important?",
+    "expected_sources": [
+      "Context enigneering.txt",
+      "Context Engineering - Session 2"
+    ],
+    "keywords": [
+      "context",
+      "prompt",
+      "tokens",
+      "retrieval",
+      "window"
+    ]
+  },
+  {
+    "id": "eval_003",
+    "question": "What is fine-tuning and when should it be used?",
+    "expected_sources": [
+      "Context Engineering - Session 2",
+      "Context enigneering.txt"
+    ],
+    "keywords": [
+      "fine-tuning",
+      "weights",
+      "pretrained",
+      "training",
+      "adaptation"
+    ]
+  },
+  {
+    "id": "eval_004",
+    "question": "How does Retrieval-Augmented Generation (RAG) work in LLM applications?",
+    "expected_sources": [
+      "Context Engineering - Session 3",
+      "Context enigneering.txt",
+      "Generative AI Basics - Session 1"
+    ],
+    "keywords": [
+      "retrieval",
+      "vector",
+      "embedding",
+      "chunks",
+      "augmented"
+    ]
+  },
+  {
+    "id": "eval_005",
+    "question": "What are the common challenges with vector embeddings and chunk overlap?",
+    "expected_sources": [
+      "Context Engineering - Session 4",
+      "Context Engineering - Session 3"
+    ],
+    "keywords": [
+      "chunk",
+      "overlap",
+      "embedding",
+      "semantic",
+      "context"
+    ]
+  }
+]
