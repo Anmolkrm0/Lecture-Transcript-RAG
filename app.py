@@ -648,6 +648,9 @@ def render_evaluation_page(vector_store, reranker, llm, embeddings):
                     retrieval_k=RETRIEVAL_K,
                     top_n=RERANK_TOP_N,
                     progress_callback=progress_cb,
+                    system_prompt=SYSTEM_PROMPT,
+                    rerank_fn=rerank_documents,
+                    extract_ts_fn=extract_timestamp,
                 )
                 st.session_state["eval_results"] = results
                 progress_bar.empty()

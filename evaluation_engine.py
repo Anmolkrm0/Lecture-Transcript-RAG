@@ -146,6 +146,40 @@ def calculate_citation_metrics(
     return {"coverage": coverage, "accuracy": round(accuracy, 4)}
 
 
+def extract_timestamp(text: str) -> str:
+    """Extract VTT/SRT transcript timestamps if present."""
+    match = re.search(r"(\d{2}:\d{2}:\d{2}(?:\.\d+)?) --> (\d{2}:\d{2}:\d{2}(?:\.\d+)?)", text)
+    if match:
+        return f"{match.group(1)} - {match.group(2)}"
+    single = re.search(r"(\d{2}:\d{2}:\d{2})", text)
+    if single:
+        return single.group(1)
+    return ""
+
+
+def default_rerank_documents(ranker, query: str, documents, top_n: int = 5):
+    """Rerank retrieved chunks using FlashRank cross-encoder."""
+    if not documents:
+        return []
+    from flashrank import RerankRequest
+    passages = [
+        {"id": i, "text": doc.page_content, "meta": doc.metadata}
+        for i, doc in enumerate(documents)
+    ]
+    rerank_req = RerankRequest(query=query, passages=passages)
+    results = ranker.rerank(rerank_req)
+    return [(documents[r["id"]], float(r.get("score", 0.0))) for r in results[:top_n]]
+
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful, precise academic assistant answering questions based solely on the provided lecture context.\n"
+    "Follow these rules strictly:\n"
+    "1. Answer ONLY using the facts directly stated in the context.\n"
+    "2. If the context does not contain enough information, state clearly: 'I couldn't find this information in your uploaded lectures.'\n"
+    "3. Ground all factual statements with in-text citations: [Source N: <Lecture/Doc>, Page <P>, Chunk <ID>].\n"
+)
+
+
 def run_single_eval(
     item: Dict[str, Any],
     vector_store,
@@ -154,13 +188,18 @@ def run_single_eval(
     embeddings,
     retrieval_k: int = 10,
     top_n: int = 5,
+    system_prompt: Optional[str] = None,
+    rerank_fn: Optional[Callable] = None,
+    extract_ts_fn: Optional[Callable] = None,
 ) -> Dict[str, Any]:
     """Execute a single evaluation benchmark test measuring all pipeline metrics."""
     from langchain_core.messages import HumanMessage, SystemMessage
-    from app import SYSTEM_PROMPT, rerank_documents, extract_timestamp
 
     question = item.get("question", "")
     expected_sources = item.get("expected_sources", [])
+    active_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+    active_rerank = rerank_fn or default_rerank_documents
+    active_ts = extract_ts_fn or extract_timestamp
 
     total_start = time.perf_counter()
 
@@ -171,7 +210,7 @@ def run_single_eval(
 
     # 2. Reranking
     rerank_start = time.perf_counter()
-    reranked_pairs = rerank_documents(reranker, question, initial_docs, top_n=top_n)
+    reranked_pairs = active_rerank(reranker, question, initial_docs, top_n=top_n)
     rerank_time = time.perf_counter() - rerank_start
 
     retrieved_source_names = [d.metadata.get("source", "") for d, _ in reranked_pairs]
@@ -184,7 +223,7 @@ def run_single_eval(
     for idx, (doc, score) in enumerate(reranked_pairs, start=1):
         src_name = doc.metadata.get("source", "Unknown Document")
         page_num = doc.metadata.get("page", 1)
-        ts = extract_timestamp(doc.page_content)
+        ts = active_ts(doc.page_content)
         loc = f"Page {page_num}" + (f", Time: {ts}" if ts else "")
         context_parts.append(f"--- [Source {idx}: {src_name} ({loc})] ---\n{doc.page_content}")
 
@@ -193,7 +232,7 @@ def run_single_eval(
 
     # 4. Generation
     gen_start = time.perf_counter()
-    system_content = f"{SYSTEM_PROMPT}\n\nContext:\n{context_str}"
+    system_content = f"{active_prompt}\n\nContext:\n{context_str}"
     messages = [
         SystemMessage(content=system_content),
         HumanMessage(content=question),
@@ -251,6 +290,9 @@ def run_full_evaluation(
     retrieval_k: int = 10,
     top_n: int = 5,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    system_prompt: Optional[str] = None,
+    rerank_fn: Optional[Callable] = None,
+    extract_ts_fn: Optional[Callable] = None,
 ) -> Dict[str, Any]:
     """Run full benchmark evaluation across the dataset and aggregate summary metrics."""
     if not dataset:
@@ -270,6 +312,9 @@ def run_full_evaluation(
             embeddings=embeddings,
             retrieval_k=retrieval_k,
             top_n=top_n,
+            system_prompt=system_prompt,
+            rerank_fn=rerank_fn,
+            extract_ts_fn=extract_ts_fn,
         )
         results.append(res)
 
