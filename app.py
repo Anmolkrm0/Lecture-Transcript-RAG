@@ -95,6 +95,9 @@ st.set_page_config(
 )
 
 
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", os.getenv("OLLAMA_HOST", "http://localhost:11434"))
+
+
 # ==========================================
 # Resource Caching (@st.cache_resource)
 # ==========================================
@@ -106,6 +109,7 @@ def load_llm(model_name: str = LLM_MODEL) -> ChatOllama:
     return ChatOllama(
         model=model_name,
         temperature=0.2,
+        base_url=OLLAMA_BASE_URL,
     )
 
 
@@ -116,6 +120,7 @@ def load_embeddings(model_name: str = EMBEDDING_MODEL) -> OllamaEmbeddings:
     """
     return OllamaEmbeddings(
         model=model_name,
+        base_url=OLLAMA_BASE_URL,
     )
 
 
