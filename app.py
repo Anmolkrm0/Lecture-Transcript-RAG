@@ -98,29 +98,51 @@ st.set_page_config(
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", os.getenv("OLLAMA_HOST", "http://localhost:11434"))
 
 
+def check_ollama_connection(base_url: str) -> Tuple[bool, str]:
+    """Test connection to Ollama base_url with quick timeout."""
+    try:
+        import urllib.request
+        import json
+        clean_url = base_url.rstrip("/")
+        req = urllib.request.Request(f"{clean_url}/api/tags", headers={"User-Agent": "LectureRAG/1.0"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode())
+                models = [m.get("name", "") for m in data.get("models", [])]
+                return True, f"Online ({len(models)} models available)"
+    except Exception as e:
+        err_str = str(e)
+        if "connection refused" in err_str.lower() or "operation not permitted" in err_str.lower():
+            return False, "Connection refused (daemon not running)"
+        elif "timed out" in err_str.lower():
+            return False, "Connection timed out"
+        return False, f"Offline ({err_str})"
+    return False, "Offline"
+
+
 # ==========================================
 # Resource Caching (@st.cache_resource)
 # ==========================================
 @st.cache_resource(show_spinner=False)
-def load_llm(model_name: str = LLM_MODEL) -> ChatOllama:
+def load_llm(model_name: str = LLM_MODEL, base_url: str = OLLAMA_BASE_URL) -> ChatOllama:
     """Initialize and cache the Ollama LLM.
     Cached once per session to avoid re-allocating unified memory.
     """
     return ChatOllama(
         model=model_name,
         temperature=0.2,
-        base_url=OLLAMA_BASE_URL,
+        base_url=base_url,
     )
 
 
 @st.cache_resource(show_spinner=False)
-def load_embeddings(model_name: str = EMBEDDING_MODEL) -> OllamaEmbeddings:
+def load_embeddings(model_name: str = EMBEDDING_MODEL, base_url: str = OLLAMA_BASE_URL) -> OllamaEmbeddings:
     """Initialize and cache the Ollama Embeddings model.
     Cached once per session to prevent repeated model reloading.
     """
     return OllamaEmbeddings(
         model=model_name,
-        base_url=OLLAMA_BASE_URL,
+        base_url=base_url,
     )
 
 
@@ -273,7 +295,32 @@ def ingest_chunks_memory_safe(
             status_container.write(f"🔄 **Batch {batch_num}/{total_batches}:** Generating embeddings & writing {batch_count} chunks to ChromaDB...")
 
         # Ingest the batch
-        vector_store.add_documents(documents=batch)
+        try:
+            vector_store.add_documents(documents=batch)
+        except Exception as e:
+            err_text = str(e)
+            current_url = st.session_state.get("ollama_base_url", OLLAMA_BASE_URL)
+            if "connection" in err_text.lower() or "11434" in err_text or "failed to connect" in err_text.lower():
+                user_msg = (
+                    f"⚠️ ConnectionError: Could not connect to Ollama at `{current_url}`.\n\n"
+                    "If you are deployed on Render or Cloud, Render does not run Ollama locally.\n\n"
+                    "**How to Fix:**\n"
+                    "1. Expose your local Ollama port using a tunnel: `cloudflared tunnel --url http://localhost:11434` or `ngrok http 11434`.\n"
+                    "2. Enter the public tunnel URL in the sidebar under **Ollama Connection**, or set `OLLAMA_BASE_URL` in your Render Environment Variables."
+                )
+            else:
+                user_msg = f"⚠️ Ingestion error: {err_text}"
+            if status_container:
+                status_container.update(label="❌ Ingestion Failed", state="error")
+                status_container.error(user_msg)
+            return {
+                "chunks": 0,
+                "batches": 0,
+                "elapsed_seconds": 0.0,
+                "embeddings_generated": False,
+                "saved_in_db": False,
+                "error": user_msg,
+            }
 
         # Update progress before cleanup
         progress = min((i + batch_count) / total_chunks, 1.0)
@@ -774,10 +821,16 @@ def render_evaluation_page(vector_store, reranker, llm, embeddings):
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Ollama Host / Base URL Resolution
+if "ollama_base_url" not in st.session_state:
+    st.session_state["ollama_base_url"] = os.getenv("OLLAMA_BASE_URL", os.getenv("OLLAMA_HOST", "http://localhost:11434"))
+
+active_ollama_url = st.session_state["ollama_base_url"]
+
 # Initialize resources
-embeddings = load_embeddings()
+embeddings = load_embeddings(base_url=active_ollama_url)
 vector_store = load_vector_store(embeddings)
-llm = load_llm()
+llm = load_llm(base_url=active_ollama_url)
 reranker = load_reranker()
 
 text_splitter = RecursiveCharacterTextSplitter(
@@ -793,7 +846,32 @@ total_chunks_count, existing_sources = get_indexed_metadata(vector_store)
 # ==========================================
 with st.sidebar:
     st.title(f"{APP_ICON} {APP_TITLE}")
-    st.markdown("Local, memory-safe RAG assistant for **Apple Silicon Mac**.")
+    st.markdown("Local, memory-safe RAG assistant for **Apple Silicon Mac** & Cloud.")
+
+    # 🌐 Ollama Connection & Health Widget
+    ollama_ok, ollama_msg = check_ollama_connection(active_ollama_url)
+    with st.expander("🌐 Ollama Connection & Status", expanded=not ollama_ok):
+        configured_url = st.text_input(
+            "Ollama Base URL",
+            value=st.session_state["ollama_base_url"],
+            placeholder="http://localhost:11434",
+            help="For Render/Cloud deployments, enter your public tunnel URL (e.g. from Cloudflare Tunnel or ngrok).",
+            key="ollama_url_input",
+        )
+        if configured_url.strip() and configured_url.strip() != st.session_state["ollama_base_url"]:
+            st.session_state["ollama_base_url"] = configured_url.strip()
+            st.rerun()
+
+        if ollama_ok:
+            st.success(f"🟢 **Ollama Connected**\n\n{ollama_msg}")
+        else:
+            st.error(f"🔴 **Ollama Offline**\n\n`{active_ollama_url}`\n\n{ollama_msg}")
+            st.caption(
+                "💡 **Deploying on Render?**\n\n"
+                "Render does not run Ollama locally. Expose your Mac's Ollama via:\n\n"
+                "`cloudflared tunnel --url http://localhost:11434`\n\n"
+                "or `ngrok http 11434`, then paste the HTTPS URL above."
+            )
     
     st.markdown("---")
     st.subheader("📥 Add Lecture Transcripts")
@@ -823,10 +901,14 @@ with st.sidebar:
                             status_box.write(f"🧩 **Step 2:** Created `{len(chunks)}` chunks (chunk_size={CHUNK_SIZE}, overlap={CHUNK_OVERLAP})")
                             status_box.write(f"🧠 **Step 3:** Generating embeddings via `{EMBEDDING_MODEL}` (Ollama, 768-dim) in batches of {BATCH_SIZE}...")
                             report = ingest_chunks_memory_safe(vector_store, chunks, batch_size=BATCH_SIZE, delay=BATCH_DELAY_SECONDS, status_container=status_box)
-                            status_box.write(f"💾 **Step 4:** Saved `{report['chunks']}` chunks to ChromaDB collection `{COLLECTION_NAME}` in {report['elapsed_seconds']}s")
-                            status_box.update(label=f"✅ Ingestion Complete! ({len(chunks)} chunks saved)", state="complete", expanded=False)
-                            time.sleep(1.0)
-                            st.rerun()
+                            if report.get("error"):
+                                status_box.update(label="❌ Ingestion Failed", state="error")
+                                st.error(report["error"])
+                            else:
+                                status_box.write(f"💾 **Step 4:** Saved `{report['chunks']}` chunks to ChromaDB collection `{COLLECTION_NAME}` in {report['elapsed_seconds']}s")
+                                status_box.update(label=f"✅ Ingestion Complete! ({len(chunks)} chunks saved)", state="complete", expanded=False)
+                                time.sleep(1.0)
+                                st.rerun()
                         else:
                             status_box.update(label="⚠️ No readable text found", state="error")
                             st.warning("No readable text found in the selected file(s).")
@@ -876,10 +958,14 @@ with st.sidebar:
                         status_box.write(f"🧩 **Step 2:** Created `{len(chunks)}` chunks (chunk_size={CHUNK_SIZE}, overlap={CHUNK_OVERLAP})")
                         status_box.write(f"🧠 **Step 3:** Generating embeddings via `{EMBEDDING_MODEL}` (Ollama, 768-dim) in batches of {BATCH_SIZE}...")
                         report = ingest_chunks_memory_safe(vector_store, chunks, batch_size=BATCH_SIZE, delay=BATCH_DELAY_SECONDS, status_container=status_box)
-                        status_box.write(f"💾 **Step 4:** Saved `{report['chunks']}` chunks to ChromaDB collection `{COLLECTION_NAME}` in {report['elapsed_seconds']}s")
-                        status_box.update(label=f"✅ Ingestion Complete! ({len(chunks)} chunks saved)", state="complete", expanded=False)
-                        time.sleep(1.0)
-                        st.rerun()
+                        if report.get("error"):
+                            status_box.update(label="❌ Ingestion Failed", state="error")
+                            st.error(report["error"])
+                        else:
+                            status_box.write(f"💾 **Step 4:** Saved `{report['chunks']}` chunks to ChromaDB collection `{COLLECTION_NAME}` in {report['elapsed_seconds']}s")
+                            status_box.update(label=f"✅ Ingestion Complete! ({len(chunks)} chunks saved)", state="complete", expanded=False)
+                            time.sleep(1.0)
+                            st.rerun()
                     else:
                         status_box.update(label="⚠️ No valid text could be processed", state="error")
                         st.warning("No valid text could be processed.")
